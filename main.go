@@ -1,11 +1,14 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"net"
 	"net/http"
 	"os"
+	"os/signal"
+	"time"
 )
 
 var (
@@ -15,7 +18,14 @@ var (
 )
 
 func getUserAgent(w http.ResponseWriter, r *http.Request) {
-	fmt.Fprintf(w, "<p>Browser User Agent: %s</p>", r.Header.Get("User-Agent"))
+	fmt.Fprintf(w, "<pre>Browser User Agent: %s</pre>", r.Header.Get("User-Agent"))
+}
+
+func getHttpConnInfo(w http.ResponseWriter, req *http.Request) {
+
+	fmt.Fprintf(w, "<pre>\n")
+	fmt.Fprintf(w, "HTTP Protocol Version: %v.%v\n", req.ProtoMajor, req.ProtoMinor)
+	fmt.Fprintf(w, "</pre>\n")
 }
 
 func getIP(w http.ResponseWriter, req *http.Request) {
@@ -32,9 +42,11 @@ func getIP(w http.ResponseWriter, req *http.Request) {
 	}
 
 	forward := req.Header.Get("X-Forwarded-For")
-	fmt.Fprintf(w, "<p>IP: %s</p>", ip)
-	fmt.Fprintf(w, "<p>Port: %s</p>", port)
-	fmt.Fprintf(w, "<p>Forwarded for: %s</p>", forward)
+	fmt.Fprintf(w, "<pre>\n")
+	fmt.Fprintf(w, "IP: %s\n", ip)
+	fmt.Fprintf(w, "Port: %s\n", port)
+	fmt.Fprintf(w, "Forwarded for: %s\n", forward)
+	fmt.Fprintf(w, "</pre>\n")
 }
 
 func getHeaders(w http.ResponseWriter, req *http.Request) {
@@ -59,6 +71,20 @@ func writeFooter(w http.ResponseWriter) {
 	fmt.Fprintf(w, "\n\n")
 }
 
+func HttpIP(w http.ResponseWriter, r *http.Request) {
+	LogInfo.Println("Serving Request for user agent.")
+	writeHeader(w, "Http: IP Address")
+	getIP(w, r)
+	writeFooter(w)
+}
+
+func HttpProtoInfo(w http.ResponseWriter, r *http.Request) {
+	LogInfo.Println("Serving Request for user agent.")
+	writeHeader(w, "Http: Protocol Information")
+	getHttpConnInfo(w, r)
+	writeFooter(w)
+}
+
 func HttpUA(w http.ResponseWriter, r *http.Request) {
 	LogInfo.Println("Serving Request for user agent.")
 	writeHeader(w, "Http: User Agent")
@@ -78,6 +104,7 @@ func HttpSummary(w http.ResponseWriter, r *http.Request) {
 	LogInfo.Println("Serving default request")
 	writeHeader(w, "Http: Summary")
 	getIP(w, r)
+	getHttpConnInfo(w, r)
 	getUserAgent(w, r)
 	getHeaders(w, r)
 	writeFooter(w)
@@ -89,13 +116,47 @@ func main() {
 	LogWarn = log.New(os.Stderr, "[WARN] ", log.Ldate|log.Ltime)
 	LogError = log.New(os.Stderr, "[ERROR] ", log.Ldate|log.Ltime)
 
-	mux := http.NewServeMux()
-	mux.HandleFunc("/ua", HttpUA)
-	mux.HandleFunc("/h", HttpHeaders)
-	mux.HandleFunc("/", HttpSummary)
+	router := http.NewServeMux()
+	router.HandleFunc("/ua", HttpUA)
+	router.HandleFunc("/h", HttpHeaders)
+	router.HandleFunc("/ip", HttpIP)
+	router.HandleFunc("/proto", HttpProtoInfo)
+	router.HandleFunc("/", HttpSummary)
+
+	server := &http.Server{
+		Addr:    ":9119",
+		Handler: router,
+	}
+
+	servertls := &http.Server{
+		Addr:    ":9120",
+		Handler: router,
+	}
+
+	done := make(chan bool)
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, os.Interrupt)
+
+	go func() {
+		<-quit
+		LogInfo.Println("Server is shutting down...")
+
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
+		server.SetKeepAlivesEnabled(false)
+		if err := server.Shutdown(ctx); err != nil {
+			LogWarn.Fatalf("Could not gracefully shutdown the server: %v\n", err)
+		}
+		close(done)
+	}()
+
 	LogInfo.Println("Starting Up")
-	err := http.ListenAndServe(":9119", mux)
-	if err != nil {
+	if err := servertls.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		LogError.Fatalln(err)
+		return
+	}
+	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		LogError.Fatalln(err)
 		return
 	}
